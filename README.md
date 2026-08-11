@@ -86,6 +86,11 @@ reduces the tool-discovery payload without changing any tool's request or respon
 - `create_bulk_tasks`
 - `update_bulk_tasks`
 
+`create_task` and `update_task` accept either `description` for plain text or
+`markdown_description` for formatted Markdown, but not both. The server maps
+`markdown_description` to ClickUp's upstream `markdown_content` field. The same input
+contract applies to items in `create_bulk_tasks` and `update_bulk_tasks`.
+
 ### Comments
 
 - `get_task_comments`

@@ -4,7 +4,13 @@ export interface Logger {
   error(event: string, fields?: Record<string, unknown>): void;
 }
 
-const REDACTED_KEYS = /authorization|token|secret|password|cookie|description|comment|email|query/i;
+const REDACTED_KEYS =
+  /authorization|token|secret|password|cookie|description|comment|email|query|path/i;
+
+function shouldRedactKey(key: string): boolean {
+  const normalized = key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+  return REDACTED_KEYS.test(normalized) || /(^|_)ids?($|_)/.test(normalized);
+}
 
 function redact(value: unknown, depth = 0): unknown {
   if (depth > 4) return '[MAX_DEPTH]';
@@ -13,7 +19,7 @@ function redact(value: unknown, depth = 0): unknown {
     return Object.fromEntries(
       Object.entries(value).map(([key, child]) => [
         key,
-        REDACTED_KEYS.test(key) ? '[REDACTED]' : redact(child, depth + 1),
+        shouldRedactKey(key) ? '[REDACTED]' : redact(child, depth + 1),
       ]),
     );
   }

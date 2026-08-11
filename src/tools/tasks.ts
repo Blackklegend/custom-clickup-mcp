@@ -79,6 +79,7 @@ const UpdateTaskShape = {
   ...TaskReferenceShape,
   name: z.string().trim().min(1).max(2_000).optional(),
   description: z.string().optional(),
+  markdown_description: z.string().optional(),
   status: z.string().trim().min(1).max(100).optional(),
   priority: PrioritySchema.nullable().optional(),
   due_date: DateTimeSchema.nullable().optional(),
@@ -101,7 +102,15 @@ function requireUpdate(input: Record<string, unknown>, context: z.RefinementCtx)
 const UpdateTaskInputSchema = z
   .object(UpdateTaskShape)
   .strict()
-  .superRefine((input, context) => requireUpdate(input, context));
+  .superRefine((input, context) => {
+    requireUpdate(input, context);
+    if (input.description !== undefined && input.markdown_description !== undefined) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Provide description or markdown_description, not both.',
+      });
+    }
+  });
 
 const CustomFieldValueSchema = z
   .object({
@@ -217,6 +226,9 @@ function updateTaskBody(input: UpdateTaskInput): Record<string, unknown> {
   return {
     ...(input.name === undefined ? {} : { name: input.name }),
     ...(input.description === undefined ? {} : { description: input.description }),
+    ...(input.markdown_description === undefined
+      ? {}
+      : { markdown_content: input.markdown_description }),
     ...(input.status === undefined ? {} : { status: input.status }),
     ...(input.priority === undefined
       ? {}

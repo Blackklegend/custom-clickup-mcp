@@ -187,7 +187,6 @@ export class ClickUpClient {
           this.#logger.info('clickup.http', {
             method,
             version,
-            path: request.path,
             status: response.status,
             duration_ms: Date.now() - startedAt,
             attempt: attempt + 1,
@@ -201,7 +200,6 @@ export class ClickUpClient {
           this.#logger.warn('clickup.retry', {
             method,
             version,
-            path: request.path,
             status: response.status,
             wait_ms: waitMs,
             attempt: attempt + 1,

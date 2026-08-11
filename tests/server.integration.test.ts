@@ -95,7 +95,10 @@ describe('MCP server integration', () => {
     expect(Buffer.byteLength(JSON.stringify(listed))).toBeLessThan(12_000);
 
     const createTaskSchema = listed.tools.find(({ name }) => name === 'create_task')?.inputSchema;
+    const updateTaskSchema = listed.tools.find(({ name }) => name === 'update_task')?.inputSchema;
     expect(JSON.stringify(createTaskSchema)).not.toContain('02-29');
     expect(createTaskSchema).toHaveProperty('properties.due_date.format', 'date-time');
+    expect(createTaskSchema).toHaveProperty('properties.markdown_description');
+    expect(updateTaskSchema).toHaveProperty('properties.markdown_description');
   });
 });

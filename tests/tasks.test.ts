@@ -163,16 +163,30 @@ describe('task tools', () => {
     const harness = createHarness({}, () => jsonResponse({ id: 'task-1' }));
     await harness.callbacks.get('update_task')?.({
       task_id: 'task-1',
+      markdown_description: '# Details\n\n| Item | Value |\n| --- | --- |\n| Format | **kept** |',
       priority: null,
       assignees: { add: ['10'], rem: ['11'] },
       archived: false,
     });
     expect(harness.requests[0]?.method).toBe('PUT');
     expect(harness.requests[0]?.body).toEqual({
+      markdown_content: '# Details\n\n| Item | Value |\n| --- | --- |\n| Format | **kept** |',
       priority: null,
       assignees: { add: [10], rem: [11] },
       archived: false,
     });
+  });
+
+  it('rejects conflicting plain-text and Markdown task descriptions', async () => {
+    const harness = createHarness({}, () => jsonResponse({ id: 'task-1' }));
+    const result = await harness.callbacks.get('update_task')?.({
+      task_id: 'task-1',
+      description: 'Plain text',
+      markdown_description: '**Markdown**',
+    });
+
+    expect(result?.isError).toBe(true);
+    expect(harness.requests).toHaveLength(0);
   });
 
   it('discovers and validates every custom field before writing', async () => {

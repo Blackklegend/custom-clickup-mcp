@@ -20,7 +20,6 @@ function main(): void {
       .validateAuthentication()
       .then((auth) => {
         logger.info('clickup.authenticated', {
-          user_id: auth.userId,
           workspace_count: auth.workspaceIds.length,
         });
       })
