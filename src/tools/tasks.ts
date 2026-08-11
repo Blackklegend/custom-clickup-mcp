@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { ToolFailure, normalizeError } from '../errors.js';
 import { asArray, asRecord, stringId, stringValue } from '../utils/json.js';
 import {
+  DateTimeSchema,
   IdSchema,
   NumericIdSchema,
   additiveAnnotations,
@@ -16,7 +17,6 @@ import {
 import type { ToolDependencies } from './types.js';
 
 const PrioritySchema = z.enum(['1', '2', '3', '4']);
-const DateTimeSchema = z.iso.datetime({ offset: true });
 
 const TaskReferenceShape = {
   task_id: IdSchema,

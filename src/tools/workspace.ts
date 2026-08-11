@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { asArray, asRecord, stringId, stringValue } from '../utils/json.js';
 import {
+  DateTimeSchema,
   IdSchema,
   NumericIdSchema,
   additiveAnnotations,
@@ -27,7 +28,7 @@ const ListCreateFields = {
   status: z.string().trim().min(1).optional(),
   priority: z.enum(['1', '2', '3', '4']).optional(),
   assignee: NumericIdSchema.optional(),
-  due_date: z.string().datetime({ offset: true }).optional(),
+  due_date: DateTimeSchema.optional(),
 } as const;
 
 const CreateListInSpaceSchema = z
@@ -45,7 +46,7 @@ const UpdateListSchema = z
     status: z.string().trim().min(1).nullable().optional(),
     priority: z.enum(['1', '2', '3', '4']).nullable().optional(),
     assignee: NumericIdSchema.nullable().optional(),
-    due_date: z.string().datetime({ offset: true }).nullable().optional(),
+    due_date: DateTimeSchema.nullable().optional(),
   })
   .strict();
 const GetFolderSchema = z.object({ folder_id: IdSchema }).strict();

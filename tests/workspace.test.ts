@@ -48,6 +48,7 @@ function setup(): { callbacks: Map<string, Callback>; request: ReturnType<typeof
     cache: new MemoryCache(),
     config: {
       apiToken: 'test',
+      toolProfile: 'full',
       enableDestructive: false,
       enableBulkWrites: false,
       bulkMaxItems: 25,
@@ -139,6 +140,7 @@ describe('workspace tools', () => {
       cache: new MemoryCache(),
       config: {
         apiToken: 'test',
+        toolProfile: 'full',
         enableDestructive: false,
         enableBulkWrites: false,
         bulkMaxItems: 25,

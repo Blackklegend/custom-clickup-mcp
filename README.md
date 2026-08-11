@@ -1,6 +1,6 @@
 # Custom ClickUp MCP
 
-Local MCP server for the essential ClickUp workflows used by Pappsales. It runs over `stdio`, uses one ClickUp personal API token per process, and exposes a deliberately bounded P0 tool set.
+Local MCP server for the essential ClickUp workflows. It runs over `stdio`, uses one ClickUp personal API token per process, and exposes a deliberately bounded P0 tool set.
 
 ## Requirements
 
@@ -52,6 +52,7 @@ Any client that supports MCP over `stdio` can launch the same command. The SDK s
 | --- | --- | --- | --- |
 | `CLICKUP_API_TOKEN` | yes | — | Personal ClickUp API token. Never logged or persisted. |
 | `CLICKUP_DEFAULT_WORKSPACE_ID` | no | — | Default Workspace when a tool does not receive `workspace_id`. |
+| `CLICKUP_TOOL_PROFILE` | no | `full` | Tool catalog: all 32 tools with `full`, or the compact common-workflow catalog with `core`. |
 | `CLICKUP_ENABLE_DESTRUCTIVE` | no | `false` | Allows confirmed Task deletion and Custom Field value removal. |
 | `CLICKUP_ENABLE_BULK_WRITES` | no | `false` | Allows confirmed bulk task writes and multi-field Custom Field writes. |
 | `CLICKUP_BULK_MAX_ITEMS` | no | `25` | Per-call bulk limit; maximum allowed value is 100. |
@@ -62,7 +63,10 @@ Any client that supports MCP over `stdio` can launch the same command. The SDK s
 
 ## Tools
 
-The server exposes exactly 32 tools in P0.
+The default `full` profile exposes exactly 32 tools in P0. Set
+`CLICKUP_TOOL_PROFILE=core` to expose only the common search, Task, comment, Tag,
+hierarchy, and assignee-resolution workflow. The compact profile contains 14 tools and
+reduces the tool-discovery payload without changing any tool's request or response shape.
 
 ### Search
 

@@ -46,7 +46,7 @@ describe('move tools', () => {
       list_id: 'new-list',
       move_custom_fields: true,
       status_mappings: [
-        { source_status: 'status-a', destination_status: 'status-b' },
+        { source_status_id: 'status-a', destination_status_id: 'status-b' },
       ],
     });
 
@@ -58,8 +58,10 @@ describe('move tools', () => {
       method: 'PUT',
       body: {
         move_custom_fields: true,
+        // Field names come from ClickUp's OpenAPI reference, not the guide page;
+        // the guide's unsuffixed names are rejected with HTTP 400. See move.ts.
         status_mappings: [
-          { source_status: 'status-a', destination_status: 'status-b' },
+          { source_status_id: 'status-a', destination_status_id: 'status-b' },
         ],
       },
     });

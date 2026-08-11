@@ -7,6 +7,7 @@ import { noopLogger } from '../src/logging.js';
 const config: AppConfig = {
   apiToken: 'pk_secret',
   defaultWorkspaceId: '42',
+  toolProfile: 'full',
   enableDestructive: false,
   enableBulkWrites: false,
   bulkMaxItems: 25,
@@ -22,6 +23,7 @@ describe('ClickUpClient', () => {
 
     const withoutDefaultConfig: AppConfig = {
       apiToken: config.apiToken,
+      toolProfile: config.toolProfile,
       enableDestructive: config.enableDestructive,
       enableBulkWrites: config.enableBulkWrites,
       bulkMaxItems: config.bulkMaxItems,
@@ -70,7 +72,7 @@ describe('ClickUpClient', () => {
         }),
       )
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ teams: [{ id: '42', name: 'Pappsales', members: [] }] }), {
+        new Response(JSON.stringify({ teams: [{ id: '42', name: 'My Workspace', members: [] }] }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         }),

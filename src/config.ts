@@ -1,13 +1,26 @@
 import { ToolFailure } from './errors.js';
 
+export type ToolProfile = 'core' | 'full';
+
 export interface AppConfig {
   apiToken: string;
   defaultWorkspaceId?: string;
+  toolProfile: ToolProfile;
   enableDestructive: boolean;
   enableBulkWrites: boolean;
   bulkMaxItems: number;
   searchMaxPages: number;
   requestTimeoutMs: number;
+}
+
+function readToolProfile(env: NodeJS.ProcessEnv): ToolProfile {
+  const value = readOptional(env, 'CLICKUP_TOOL_PROFILE') ?? 'full';
+  if (value === 'core' || value === 'full') return value;
+  throw new ToolFailure(
+    'CONFIG_INVALID',
+    'CLICKUP_TOOL_PROFILE must be "core" or "full".',
+    false,
+  );
 }
 
 function readOptional(env: NodeJS.ProcessEnv, name: string): string | undefined {
@@ -57,6 +70,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     apiToken,
     ...(defaultWorkspaceId === undefined ? {} : { defaultWorkspaceId }),
+    toolProfile: readToolProfile(env),
     enableDestructive: readBoolean(env, 'CLICKUP_ENABLE_DESTRUCTIVE', false),
     enableBulkWrites: readBoolean(env, 'CLICKUP_ENABLE_BULK_WRITES', false),
     bulkMaxItems: readInteger(env, 'CLICKUP_BULK_MAX_ITEMS', 25, 1, 100),

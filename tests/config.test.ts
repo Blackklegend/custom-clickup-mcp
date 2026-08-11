@@ -7,6 +7,7 @@ describe('loadConfig', () => {
   it('loads safe defaults', () => {
     expect(loadConfig({ CLICKUP_API_TOKEN: 'pk_test' })).toEqual({
       apiToken: 'pk_test',
+      toolProfile: 'full',
       enableDestructive: false,
       enableBulkWrites: false,
       bulkMaxItems: 25,
@@ -20,6 +21,7 @@ describe('loadConfig', () => {
       loadConfig({
         CLICKUP_API_TOKEN: 'pk_test',
         CLICKUP_DEFAULT_WORKSPACE_ID: '123',
+        CLICKUP_TOOL_PROFILE: 'core',
         CLICKUP_ENABLE_DESTRUCTIVE: 'true',
         CLICKUP_ENABLE_BULK_WRITES: 'true',
         CLICKUP_BULK_MAX_ITEMS: '50',
@@ -28,6 +30,7 @@ describe('loadConfig', () => {
       }),
     ).toMatchObject({
       defaultWorkspaceId: '123',
+      toolProfile: 'core',
       enableDestructive: true,
       enableBulkWrites: true,
       bulkMaxItems: 50,
@@ -53,5 +56,11 @@ describe('loadConfig', () => {
     expect(() =>
       loadConfig({ CLICKUP_API_TOKEN: 'pk_test', CLICKUP_SEARCH_MAX_PAGES: '1.5' }),
     ).toThrow(/must be an integer/);
+  });
+
+  it('rejects an unknown tool profile', () => {
+    expect(() =>
+      loadConfig({ CLICKUP_API_TOKEN: 'pk_test', CLICKUP_TOOL_PROFILE: 'minimal' }),
+    ).toThrow(/must be "core" or "full"/);
   });
 });

@@ -38,6 +38,7 @@ function setup(taskResponse: unknown): { callbacks: Map<string, Callback>; reque
     cache: new MemoryCache(),
     config: {
       apiToken: 'test',
+      toolProfile: 'full',
       enableDestructive: false,
       enableBulkWrites: false,
       bulkMaxItems: 25,

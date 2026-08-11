@@ -42,6 +42,7 @@ function setup(): {
     cache: new MemoryCache(),
     config: {
       apiToken: 'test',
+      toolProfile: 'full',
       enableDestructive: false,
       enableBulkWrites: false,
       bulkMaxItems: 25,

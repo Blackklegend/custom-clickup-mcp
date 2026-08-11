@@ -10,8 +10,20 @@ import {
 } from './shared.js';
 import type { ToolDependencies } from './types.js';
 
+/**
+ * ClickUp's own docs contradict each other here. The narrative guide shows
+ * `source_status`/`destination_status`:
+ *   https://developer.clickup.com/docs/move-a-task-to-a-new-list
+ * The OpenAPI reference (TaskSingleStatusMappingDto) requires the `_id` suffix:
+ *   https://developer.clickup.com/reference/movetask
+ *
+ * The API agrees with the reference. Verified against the live v3 endpoint with
+ * everything but the key naming held constant: `source_status_id` returns 200,
+ * `source_status` returns 400 "Invalid status mappings". Do not "fix" this to
+ * match the guide page.
+ */
 const StatusMappingSchema = z
-  .object({ source_status: IdSchema, destination_status: IdSchema })
+  .object({ source_status_id: IdSchema, destination_status_id: IdSchema })
   .strict();
 const MoveTaskSchema = z
   .object({

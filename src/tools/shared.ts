@@ -9,10 +9,20 @@ import { z } from 'zod';
 
 import { normalizeError } from '../errors.js';
 import { isRecord } from '../utils/json.js';
+import { toolIsEnabled } from './catalog.js';
 import type { ToolDependencies } from './types.js';
 
 export const IdSchema = z.string().trim().min(1).max(256);
 export const NumericIdSchema = IdSchema.regex(/^\d+$/, 'Expected a numeric ClickUp ID.');
+const StrictDateTimeSchema = z.iso.datetime({ offset: true });
+// Zod's ISO helper advertises a long validation regex in every containing JSON Schema.
+// Keep that strict runtime check but expose the standard `date-time` format to MCP clients.
+export const DateTimeSchema = z
+  .string()
+  .refine((value) => StrictDateTimeSchema.safeParse(value).success, {
+    message: 'Expected an RFC 3339 date-time with timezone.',
+  })
+  .meta({ format: 'date-time' });
 
 /**
  * Query parameters that let a ClickUp endpoint resolve a Custom Task ID. Returns an
@@ -123,9 +133,13 @@ export function registerClickUpTool<
   InputSchema extends StandardSchemaWithJSON & z.ZodType,
 >(
   server: McpServer,
-  dependencies: Pick<ToolDependencies, 'logger' | 'ensureAuthenticated'>,
+  dependencies: Pick<ToolDependencies, 'logger' | 'ensureAuthenticated'> & {
+    config?: Pick<ToolDependencies['config'], 'toolProfile'>;
+  },
   definition: ToolDefinition<InputSchema>,
 ): void {
+  if (!toolIsEnabled(dependencies.config?.toolProfile ?? 'full', definition.name)) return;
+
   const callback = (async (
     input: StandardSchemaWithJSON.InferOutput<InputSchema>,
   ): Promise<CallToolResult> => {
@@ -164,13 +178,12 @@ export function registerClickUpTool<
     }
   }) as unknown as ToolCallback<InputSchema>;
 
-  server.registerTool<typeof ToolEnvelopeSchema, InputSchema>(
+  server.registerTool(
     definition.name,
     {
       title: definition.title,
       description: definition.description,
       inputSchema: definition.inputSchema,
-      outputSchema: ToolEnvelopeSchema,
       annotations: definition.annotations,
     },
     callback,

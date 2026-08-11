@@ -38,6 +38,7 @@ function createHarness(
   const config: AppConfig = {
     apiToken: 'test-token',
     ...(includeDefaultWorkspace ? { defaultWorkspaceId: '9001' } : {}),
+    toolProfile: 'full',
     enableDestructive: false,
     enableBulkWrites: false,
     bulkMaxItems: 25,
@@ -102,6 +103,14 @@ describe('task tools', () => {
 
     const rejected = await callback?.({ list_id: 'list/1', name: 'No', unexpected: true });
     expect(rejected?.isError).toBe(true);
+    expect(harness.requests).toHaveLength(0);
+
+    const invalidDate = await callback?.({
+      list_id: 'list/1',
+      name: 'No date',
+      due_date: 'not-a-date',
+    });
+    expect(invalidDate?.isError).toBe(true);
     expect(harness.requests).toHaveLength(0);
 
     const result = await callback?.({

@@ -7,12 +7,14 @@ import type { AppConfig } from '../src/config.js';
 import { noopLogger } from '../src/logging.js';
 import { ConfirmationService } from '../src/policies/confirmation.js';
 import { createClickUpMcpServer } from '../src/server.js';
+import { CORE_TOOL_NAMES } from '../src/tools/catalog.js';
 import { TOOL_NAMES } from '../src/tools/index.js';
 import { MemoryCache } from '../src/utils/cache.js';
 
 const config: AppConfig = {
   apiToken: 'pk_test',
   defaultWorkspaceId: '42',
+  toolProfile: 'full',
   enableDestructive: false,
   enableBulkWrites: false,
   bulkMaxItems: 25,
@@ -54,6 +56,9 @@ describe('MCP server integration', () => {
     const listed = await client.listTools();
     expect(listed.tools.map(({ name }) => name)).toEqual([...TOOL_NAMES]);
     expect(listed.tools).toHaveLength(32);
+    expect(listed.tools.every((tool) => tool.outputSchema === undefined)).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(listed))).toBeLessThan(26_000);
+    expect(JSON.stringify(listed)).not.toContain('02-29');
     expect(listed.tools.find(({ name }) => name === 'create_task_comment')?.inputSchema).toHaveProperty(
       'anyOf',
     );
@@ -67,5 +72,30 @@ describe('MCP server integration', () => {
     });
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(ensureAuthenticated).toHaveBeenCalledOnce();
+  });
+
+  it('exposes a compact core catalog with bounded discovery metadata', async () => {
+    const coreConfig: AppConfig = { ...config, toolProfile: 'core' };
+    const server = createClickUpMcpServer({
+      client: new ClickUpClient(coreConfig, noopLogger),
+      config: coreConfig,
+      logger: noopLogger,
+      confirmations: new ConfirmationService(),
+      cache: new MemoryCache(),
+    });
+    const client = new Client({ name: 'integration-test', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    closeables.push(client, server);
+
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const listed = await client.listTools();
+    expect(listed.tools.map(({ name }) => name)).toEqual([...CORE_TOOL_NAMES]);
+    expect(Buffer.byteLength(JSON.stringify(listed))).toBeLessThan(12_000);
+
+    const createTaskSchema = listed.tools.find(({ name }) => name === 'create_task')?.inputSchema;
+    expect(JSON.stringify(createTaskSchema)).not.toContain('02-29');
+    expect(createTaskSchema).toHaveProperty('properties.due_date.format', 'date-time');
   });
 });
