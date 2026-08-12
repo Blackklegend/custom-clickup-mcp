@@ -118,6 +118,63 @@ describe('ClickUpClient', () => {
     expect(options?.body).toBe('{"position":0}');
   });
 
+  it('sends multipart bodies without overriding the generated content type', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ id: 'attachment-1' }), { status: 200 }),
+    );
+    const client = new ClickUpClient(config, noopLogger, fetchMock);
+    const formData = new FormData();
+    formData.append('attachment[0]', new Blob(['hello']), 'hello.txt');
+
+    await client.request({
+      path: '/task/task-1/attachment',
+      method: 'POST',
+      formData,
+    });
+
+    const [, options] = fetchMock.mock.calls[0] ?? [];
+    expect(options?.body).toBe(formData);
+    expect(new Headers(options?.headers).get('content-type')).toBeNull();
+  });
+
+  it('downloads attachment bytes with a caller-provided size limit', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response('hello', {
+        status: 200,
+        headers: { 'content-type': 'text/plain', 'content-length': '5' },
+      }),
+    );
+    const client = new ClickUpClient(config, noopLogger, fetchMock);
+
+    const downloaded = await client.download('https://attachments.clickup.com/file', 10);
+
+    expect(Buffer.from(downloaded.bytes).toString('utf8')).toBe('hello');
+    expect(downloaded).toMatchObject({ contentLength: 5, contentType: 'text/plain' });
+    const [, options] = fetchMock.mock.calls[0] ?? [];
+    expect(new Headers(options?.headers).get('authorization')).toBeNull();
+  });
+
+  it('forwards an explicit authorization header when downloading a remote upload source', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response('hello'));
+    const client = new ClickUpClient(config, noopLogger, fetchMock);
+
+    await client.download('https://files.example.com/private', 10, 'Bearer source-secret');
+
+    const [, options] = fetchMock.mock.calls[0] ?? [];
+    expect(new Headers(options?.headers).get('authorization')).toBe('Bearer source-secret');
+  });
+
+  it('rejects attachments whose declared size exceeds the download limit', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response('hello', { status: 200, headers: { 'content-length': '100' } }),
+    );
+    const client = new ClickUpClient(config, noopLogger, fetchMock);
+
+    await expect(
+      client.download('https://attachments.clickup.com/file', 10),
+    ).rejects.toMatchObject({ code: 'ATTACHMENT_TOO_LARGE' });
+  });
+
   it('rejects a default Workspace outside the authorized set', async () => {
     const fetchMock = vi
       .fn<typeof fetch>()

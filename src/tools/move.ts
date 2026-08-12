@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
+import { ToolFailure } from '../errors.js';
 import { asRecord, stringId } from '../utils/json.js';
 import {
   IdSchema,
@@ -36,6 +37,7 @@ const MoveTaskSchema = z
   })
   .strict();
 const AddTaskToListSchema = z.object({ task_id: IdSchema, list_id: IdSchema }).strict();
+const RemoveTaskFromListSchema = z.object({ task_id: IdSchema, list_id: IdSchema }).strict();
 
 function currentHomeListId(task: unknown): string | undefined {
   const taskRecord = asRecord(task, 'task response');
@@ -110,6 +112,38 @@ export function registerMoveTools(server: McpServer, dependencies: ToolDependenc
           home_list_preserved: true,
         },
         summary: `Added Task ${input.task_id} to additional List ${input.list_id}.`,
+      };
+    },
+  });
+
+  registerClickUpTool(server, dependencies, {
+    name: 'remove_task_from_list',
+    title: 'Remove Task From List',
+    description: 'Remove a Task from an additional List without removing it from its home List.',
+    inputSchema: RemoveTaskFromListSchema,
+    annotations: mutatingAnnotations,
+    handler: async (input) => {
+      const homeListId = await getTaskHomeList(dependencies, input.task_id);
+      if (homeListId === input.list_id) {
+        throw new ToolFailure(
+          'CANNOT_REMOVE_HOME_LIST',
+          'A Task cannot be removed from its home List; move it to another home List instead.',
+          false,
+          { task_id: input.task_id, home_list_id: homeListId },
+        );
+      }
+      await dependencies.client.request({
+        path: `/list/${encodeURIComponent(input.list_id)}/task/${encodeURIComponent(input.task_id)}`,
+        method: 'DELETE',
+      });
+      return {
+        data: {
+          task_id: input.task_id,
+          home_list_id: homeListId ?? null,
+          removed_list_id: input.list_id,
+          home_list_preserved: true,
+        },
+        summary: `Removed Task ${input.task_id} from additional List ${input.list_id}.`,
       };
     },
   });

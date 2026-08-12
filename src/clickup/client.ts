@@ -16,7 +16,15 @@ export interface ClickUpRequest {
   method?: HttpMethod;
   query?: Record<string, QueryValue>;
   body?: unknown;
+  formData?: FormData;
   timeoutMs?: number;
+}
+
+export interface DownloadedFile {
+  bytes: Uint8Array;
+  contentType?: string;
+  contentLength: number;
+  finalUrl: string;
 }
 
 export interface AuthorizedWorkspace {
@@ -155,6 +163,13 @@ export class ClickUpClient {
   }
 
   async request<T = unknown>(request: ClickUpRequest): Promise<T> {
+    if (request.body !== undefined && request.formData !== undefined) {
+      throw new ToolFailure(
+        'CLICKUP_REQUEST_INVALID',
+        'A ClickUp request cannot contain both a JSON body and multipart form data.',
+        false,
+      );
+    }
     const method = request.method ?? 'GET';
     const version = request.version ?? 'v2';
     const url = buildUrl(version, request.path, request.query);
@@ -178,7 +193,11 @@ export class ClickUpClient {
             Accept: 'application/json',
             ...(request.body === undefined ? {} : { 'Content-Type': 'application/json' }),
           },
-          ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+          ...(request.formData !== undefined
+            ? { body: request.formData }
+            : request.body === undefined
+              ? {}
+              : { body: JSON.stringify(request.body) }),
           signal: controller.signal,
         });
         this.#rateLimit.observe(response.headers);
@@ -222,6 +241,88 @@ export class ClickUpClient {
       } finally {
         clearTimeout(timeout);
       }
+    }
+  }
+
+  async download(url: string, maxBytes: number, authHeader?: string): Promise<DownloadedFile> {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new ToolFailure('ATTACHMENT_URL_INVALID', 'The attachment URL is invalid.', false);
+    }
+    if (parsed.protocol !== 'https:') {
+      throw new ToolFailure(
+        'ATTACHMENT_URL_INVALID',
+        'Only HTTPS attachment URLs can be downloaded.',
+        false,
+      );
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.#config.requestTimeoutMs);
+    try {
+      const response = await this.#fetch(parsed, {
+        headers: {
+          Accept: '*/*',
+          ...(authHeader === undefined ? {} : { Authorization: authHeader }),
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw upstreamError(response, await parseResponse(response));
+      }
+      const declaredLength = Number(response.headers.get('content-length'));
+      if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+        throw new ToolFailure(
+          'ATTACHMENT_TOO_LARGE',
+          `The attachment exceeds the ${maxBytes}-byte download limit.`,
+          false,
+          { max_bytes: maxBytes, content_length: declaredLength },
+        );
+      }
+      const chunks: Uint8Array[] = [];
+      let contentLength = 0;
+      const reader = response.body?.getReader();
+      if (reader !== undefined) {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          contentLength += value.byteLength;
+          if (contentLength > maxBytes) {
+            await reader.cancel();
+            throw new ToolFailure(
+              'ATTACHMENT_TOO_LARGE',
+              `The attachment exceeds the ${maxBytes}-byte download limit.`,
+              false,
+              { max_bytes: maxBytes, content_length: contentLength },
+            );
+          }
+          chunks.push(value);
+        }
+      }
+      const bytes = new Uint8Array(contentLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return {
+        bytes,
+        contentLength,
+        finalUrl: response.url || parsed.href,
+        ...(response.headers.get('content-type') === null
+          ? {}
+          : { contentType: response.headers.get('content-type')! }),
+      };
+    } catch (error) {
+      if (error instanceof ToolFailure) throw error;
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new ToolFailure('CLICKUP_TIMEOUT', 'The attachment download timed out.', true);
+      }
+      throw new ToolFailure('CLICKUP_NETWORK_ERROR', 'Could not download the attachment.', true);
+    } finally {
+      clearTimeout(timeout);
     }
   }
 

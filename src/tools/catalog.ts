@@ -6,15 +6,15 @@ import type { ToolProfile } from '../config.js';
  */
 export const CORE_TOOL_NAMES = [
   'search_workspace',
-  'search_tasks_by_task_type',
-  'search_tasks_by_tag',
+  'filter_tasks',
   'create_task',
   'get_task',
   'update_task',
   'set_task_custom_fields',
+  'get_custom_fields',
   'get_task_comments',
   'get_threaded_replies',
-  'create_task_comment',
+  'create_comment',
   'add_tag_to_task',
   'remove_tag_from_task',
   'get_workspace_hierarchy',

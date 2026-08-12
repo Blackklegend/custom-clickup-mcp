@@ -91,7 +91,7 @@ function errorCodeOf(result: CallToolResult): string | undefined {
 }
 
 describe('task tools', () => {
-  it('registers the seven P0 task tools', () => {
+  it('registers the task tools', () => {
     const { callbacks } = createHarness();
     expect([...callbacks.keys()]).toEqual(TASK_TOOL_NAMES);
   });
@@ -120,7 +120,7 @@ describe('task tools', () => {
       assignees: ['42'],
       priority: '2',
       due_date: '2026-08-11T12:00:00-03:00',
-      custom_item_id: '7',
+      time_estimate: 150,
     });
 
     expect(result?.isError).not.toBe(true);
@@ -133,8 +133,50 @@ describe('task tools', () => {
       assignees: [42],
       priority: 2,
       due_date: Date.parse('2026-08-11T12:00:00-03:00'),
-      custom_item_id: 7,
+      time_estimate: 9_000_000,
     });
+  });
+
+  it('accepts a task type by name or by ID and reports unknown types', async () => {
+    const responder = (request: RecordedRequest): Response =>
+      request.url.pathname.endsWith('/custom_item')
+        ? jsonResponse({ custom_items: [{ id: 7, name: 'Bug' }] })
+        : jsonResponse({ id: 'task-1', name: 'New task' });
+
+    const byName = createHarness({}, responder);
+    const named = await byName.callbacks.get('create_task')?.({
+      list_id: 'list-1',
+      name: 'New task',
+      task_type: 'bug',
+    });
+    expect(named?.isError).not.toBe(true);
+    expect(byName.requests[0]?.url.pathname).toBe('/api/v2/team/9001/custom_item');
+    expect(byName.requests[1]?.body).toEqual({ name: 'New task', custom_item_id: 7 });
+
+    const byId = createHarness({}, responder);
+    await byId.callbacks.get('create_task')?.({
+      list_id: 'list-1',
+      name: 'New task',
+      task_type: '7',
+    });
+    expect(byId.requests[1]?.body).toEqual({ name: 'New task', custom_item_id: 7 });
+
+    const builtIn = createHarness({}, responder);
+    await builtIn.callbacks.get('create_task')?.({
+      list_id: 'list-1',
+      name: 'A milestone',
+      task_type: 'Milestone',
+    });
+    expect(builtIn.requests[1]?.body).toEqual({ name: 'A milestone', custom_item_id: 1 });
+
+    const unknown = createHarness({}, responder);
+    const rejected = await unknown.callbacks.get('create_task')?.({
+      list_id: 'list-1',
+      name: 'New task',
+      task_type: 'Epic',
+    });
+    expect(errorCodeOf(rejected as CallToolResult)).toBe('TASK_TYPE_NOT_FOUND');
+    expect(unknown.requests.some((request) => request.method === 'POST')).toBe(false);
   });
 
   it('requires a workspace and sends the documented query for Custom Task IDs', async () => {
@@ -159,12 +201,43 @@ describe('task tools', () => {
     expect(url?.searchParams.get('include_subtasks')).toBe('true');
   });
 
+  it('previews and confirms destructive task merges', async () => {
+    const harness = createHarness(
+      { enableDestructive: true },
+      () => jsonResponse({ merged: true }),
+    );
+    const callback = harness.callbacks.get('merge_tasks');
+    const preview = await callback?.({
+      target_task_id: 'target',
+      source_task_ids: ['source-1', 'source-2'],
+    });
+    const previewData = dataOf(preview as CallToolResult);
+
+    expect(harness.requests).toHaveLength(0);
+    expect(previewData.confirmation_token).toBeTypeOf('string');
+
+    await callback?.({
+      target_task_id: 'target',
+      source_task_ids: ['source-1', 'source-2'],
+      dry_run: false,
+      confirm: true,
+      confirmation_token: previewData.confirmation_token,
+    });
+
+    expect(harness.requests[0]).toMatchObject({
+      method: 'POST',
+      body: { source_task_ids: ['source-1', 'source-2'] },
+    });
+    expect(harness.requests[0]?.url.pathname).toBe('/api/v2/task/target/merge');
+  });
+
   it('updates only supplied fields and uses ClickUp assignee delta payloads', async () => {
     const harness = createHarness({}, () => jsonResponse({ id: 'task-1' }));
     await harness.callbacks.get('update_task')?.({
       task_id: 'task-1',
       markdown_description: '# Details\n\n| Item | Value |\n| --- | --- |\n| Format | **kept** |',
       priority: null,
+      time_estimate: 90,
       assignees: { add: ['10'], rem: ['11'] },
       archived: false,
     });
@@ -172,9 +245,50 @@ describe('task tools', () => {
     expect(harness.requests[0]?.body).toEqual({
       markdown_content: '# Details\n\n| Item | Value |\n| --- | --- |\n| Format | **kept** |',
       priority: null,
+      time_estimate: 5_400_000,
       assignees: { add: [10], rem: [11] },
       archived: false,
     });
+  });
+
+  it('accepts priority as a label or as a ClickUp number', async () => {
+    const harness = createHarness({}, () => jsonResponse({ id: 'task-1' }));
+    const update = harness.callbacks.get('update_task');
+
+    await update?.({ task_id: 'task-1', priority: 'urgent' });
+    await update?.({ task_id: 'task-1', priority: '1' });
+    await update?.({ task_id: 'task-1', priority: 'low' });
+    expect(harness.requests.map((request) => request.body)).toEqual([
+      { priority: 1 },
+      { priority: 1 },
+      { priority: 4 },
+    ]);
+
+    const rejected = await update?.({ task_id: 'task-1', priority: 'urgentíssimo' });
+    expect(rejected?.isError).toBe(true);
+    expect(harness.requests).toHaveLength(3);
+  });
+
+  it('changes and resets the task type on update', async () => {
+    const harness = createHarness({}, (request) =>
+      request.url.pathname.endsWith('/custom_item')
+        ? jsonResponse({ custom_items: [{ id: 7, name: 'Bug' }] })
+        : jsonResponse({ id: 'task-1' }),
+    );
+    const update = harness.callbacks.get('update_task');
+
+    await update?.({ task_id: 'task-1', task_type: 'Bug' });
+    expect(harness.requests[0]?.url.pathname).toBe('/api/v2/team/9001/custom_item');
+    expect(harness.requests[1]?.body).toEqual({ custom_item_id: 7 });
+
+    await update?.({ task_id: 'task-1', task_type: null });
+    expect(harness.requests.at(-1)?.body).toEqual({ custom_item_id: null });
+  });
+
+  it('clears a time estimate with an explicit null', async () => {
+    const harness = createHarness({}, () => jsonResponse({ id: 'task-1' }));
+    await harness.callbacks.get('update_task')?.({ task_id: 'task-1', time_estimate: null });
+    expect(harness.requests[0]?.body).toEqual({ time_estimate: null });
   });
 
   it('rejects conflicting plain-text and Markdown task descriptions', async () => {

@@ -92,9 +92,87 @@ describe('search tools', () => {
       ],
       last_page: true,
     });
-    const result = await callbacks.get('search_tasks_by_task_type')?.({ task_type: 'bug' });
+    const result = await callbacks.get('filter_tasks')?.({ task_types: ['bug'] });
     const data = result?.structuredContent?.data as { items: Array<{ id: string }> };
     expect(data.items.map(({ id }) => id)).toEqual(['t1']);
+  });
+
+  it('composes task filters into one bounded upstream request', async () => {
+    const dueFrom = '2026-08-11T00:00:00-03:00';
+    const dueTo = '2026-08-18T00:00:00-03:00';
+    const doneFrom = '2026-08-01T00:00:00-03:00';
+    const doneTo = '2026-08-20T00:00:00-03:00';
+    const { callbacks, request } = setup({
+      tasks: [
+        {
+          id: 't1',
+          name: 'Matching bug',
+          custom_item_id: 7,
+          tags: [{ name: 'Urgent' }],
+          status: { status: 'in progress' },
+          assignees: [{ id: 42 }],
+          list: { id: '10' },
+          folder: { id: '20' },
+          space: { id: '30' },
+          due_date: String(Date.parse('2026-08-12T00:00:00-03:00')),
+          date_done: String(Date.parse('2026-08-15T00:00:00-03:00')),
+        },
+        {
+          id: 't2',
+          name: 'Rejected by client verification',
+          custom_item_id: 7,
+          tags: [{ name: 'Urgent' }],
+          status: { status: 'closed' },
+          assignees: [{ id: 42 }],
+          list: { id: '10' },
+          folder: { id: '20' },
+          space: { id: '30' },
+          due_date: String(Date.parse('2026-08-12T00:00:00-03:00')),
+          date_done: String(Date.parse('2026-08-15T00:00:00-03:00')),
+        },
+      ],
+      last_page: true,
+    });
+
+    const result = await callbacks.get('filter_tasks')?.({
+      tags: ['urgent', 'backend'],
+      statuses: ['to do', 'in progress'],
+      assignees: ['42', '43'],
+      list_ids: ['10'],
+      folder_ids: ['20'],
+      space_ids: ['30'],
+      due_date_from: dueFrom,
+      due_date_to: dueTo,
+      completion_date_from: doneFrom,
+      completion_date_to: doneTo,
+      task_types: ['Bug', 'Task'],
+      subtasks: false,
+      order_by: 'due_date',
+      reverse: true,
+    });
+
+    const data = result?.structuredContent?.data as { items: Array<{ id: string }> };
+    expect(data.items.map(({ id }) => id)).toEqual(['t1']);
+    const taskCall = request.mock.calls.find(([input]) => input.path === '/team/w1/task')?.[0];
+    expect(taskCall?.query).toEqual({
+      page: 0,
+      include_closed: false,
+      subtasks: false,
+      tags: ['urgent', 'backend'],
+      statuses: ['to do', 'in progress'],
+      assignees: ['42', '43'],
+      list_ids: ['10'],
+      project_ids: ['20'],
+      space_ids: ['30'],
+      due_date_gt: Date.parse(dueFrom),
+      due_date_lt: Date.parse(dueTo),
+      date_done_gt: Date.parse(doneFrom),
+      date_done_lt: Date.parse(doneTo),
+      custom_items: ['7', '0'],
+      order_by: 'due_date',
+      reverse: true,
+    });
+    expect(request.mock.calls.filter(([input]) => input.path === '/team/w1/custom_item')).toHaveLength(1);
   });
 
   it('maps null custom_item_id to the built-in Task type and filters upstream', async () => {
@@ -102,7 +180,7 @@ describe('search tools', () => {
       tasks: [{ id: 't1', name: 'Standard', custom_item_id: null }],
       last_page: true,
     });
-    const result = await callbacks.get('search_tasks_by_task_type')?.({ task_type: 'Task' });
+    const result = await callbacks.get('filter_tasks')?.({ task_types: ['Task'] });
     const data = result?.structuredContent?.data as { items: Array<{ id: string }> };
     expect(data.items.map(({ id }) => id)).toEqual(['t1']);
     const taskCall = request.mock.calls.find(([input]) => input.path === '/team/w1/task')?.[0];

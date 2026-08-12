@@ -55,9 +55,9 @@ describe('MCP server integration', () => {
 
     const listed = await client.listTools();
     expect(listed.tools.map(({ name }) => name)).toEqual([...TOOL_NAMES]);
-    expect(listed.tools).toHaveLength(32);
+    expect(listed.tools).toHaveLength(40);
     expect(listed.tools.every((tool) => tool.outputSchema === undefined)).toBe(true);
-    expect(Buffer.byteLength(JSON.stringify(listed))).toBeLessThan(26_000);
+    expect(Buffer.byteLength(JSON.stringify(listed))).toBeLessThan(35_000);
     expect(JSON.stringify(listed)).not.toContain('02-29');
     expect(listed.tools.find(({ name }) => name === 'create_task_comment')?.inputSchema).toHaveProperty(
       'anyOf',
@@ -92,7 +92,7 @@ describe('MCP server integration', () => {
 
     const listed = await client.listTools();
     expect(listed.tools.map(({ name }) => name)).toEqual([...CORE_TOOL_NAMES]);
-    expect(Buffer.byteLength(JSON.stringify(listed))).toBeLessThan(12_000);
+    expect(Buffer.byteLength(JSON.stringify(listed))).toBeLessThan(14_000);
 
     const createTaskSchema = listed.tools.find(({ name }) => name === 'create_task')?.inputSchema;
     const updateTaskSchema = listed.tools.find(({ name }) => name === 'update_task')?.inputSchema;

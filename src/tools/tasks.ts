@@ -3,11 +3,13 @@ import { z } from 'zod';
 
 import { ToolFailure, normalizeError } from '../errors.js';
 import { asArray, asRecord, stringId, stringValue } from '../utils/json.js';
+import type { TaskTypeResolver } from './shared.js';
 import {
   DateTimeSchema,
   IdSchema,
   NumericIdSchema,
   additiveAnnotations,
+  createTaskTypeResolver,
   mapConcurrent,
   mutatingAnnotations,
   readOnlyAnnotations,
@@ -16,7 +18,22 @@ import {
 } from './shared.js';
 import type { ToolDependencies } from './types.js';
 
-const PrioritySchema = z.enum(['1', '2', '3', '4']);
+// ClickUp's priority scale is fixed at four values, so both the labels and the wire
+// numbers are accepted and normalized here rather than looked up per Workspace.
+const PrioritySchema = z.enum(['urgent', 'high', 'normal', 'low', '1', '2', '3', '4']);
+const PRIORITY_VALUES: Record<z.output<typeof PrioritySchema>, number> = {
+  urgent: 1,
+  high: 2,
+  normal: 3,
+  low: 4,
+  '1': 1,
+  '2': 2,
+  '3': 3,
+  '4': 4,
+};
+const TaskTypeSchema = z.string().trim().min(1).max(255);
+// Tool inputs speak minutes; ClickUp's `time_estimate` is milliseconds on the wire.
+const MINUTE_MS = 60_000;
 
 const TaskReferenceShape = {
   task_id: IdSchema,
@@ -35,12 +52,13 @@ const CreateTaskShape = {
   priority: PrioritySchema.optional(),
   due_date: DateTimeSchema.optional(),
   due_date_time: z.boolean().optional(),
-  time_estimate_ms: z.number().int().nonnegative().optional(),
+  time_estimate: z.number().int().nonnegative().optional(),
   start_date: DateTimeSchema.optional(),
   start_date_time: z.boolean().optional(),
   notify_all: z.boolean().optional(),
   parent: IdSchema.optional(),
-  custom_item_id: NumericIdSchema.optional(),
+  task_type: TaskTypeSchema.optional(),
+  workspace_id: IdSchema.optional(),
   check_required_custom_fields: z.boolean().optional(),
 };
 
@@ -84,10 +102,11 @@ const UpdateTaskShape = {
   priority: PrioritySchema.nullable().optional(),
   due_date: DateTimeSchema.nullable().optional(),
   due_date_time: z.boolean().optional(),
-  time_estimate_ms: z.number().int().nonnegative().nullable().optional(),
+  time_estimate: z.number().int().nonnegative().nullable().optional(),
   start_date: DateTimeSchema.nullable().optional(),
   start_date_time: z.boolean().optional(),
   assignees: AssigneeChangesSchema.optional(),
+  task_type: TaskTypeSchema.nullable().optional(),
   archived: z.boolean().optional(),
 };
 
@@ -160,6 +179,36 @@ const DeleteTaskInputSchema = z
   })
   .strict();
 
+const MergeTasksInputSchema = z
+  .object({
+    target_task_id: IdSchema,
+    source_task_ids: z.array(IdSchema).min(1).max(100),
+    dry_run: z.boolean().optional().default(true),
+    confirm: z.boolean().optional().default(false),
+    confirmation_token: z.string().min(1).optional(),
+  })
+  .strict()
+  .superRefine((input, context) => {
+    const seen = new Set<string>();
+    for (const [index, sourceId] of input.source_task_ids.entries()) {
+      if (sourceId === input.target_task_id) {
+        context.addIssue({
+          code: 'custom',
+          path: ['source_task_ids', index],
+          message: 'The target task cannot also be a source task.',
+        });
+      }
+      if (seen.has(sourceId)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['source_task_ids', index],
+          message: 'Each source task may only be included once.',
+        });
+      }
+      seen.add(sourceId);
+    }
+  });
+
 const CreateBulkTasksInputSchema = z
   .object({
     items: z.array(CreateTaskInputSchema).min(1).max(100),
@@ -193,7 +242,10 @@ function numericId(value: string): number {
   return converted;
 }
 
-function createTaskBody(input: CreateTaskInput): Record<string, unknown> {
+function createTaskBody(
+  input: CreateTaskInput,
+  customItemId: string | undefined,
+): Record<string, unknown> {
   return {
     name: input.name,
     ...(input.description === undefined ? {} : { description: input.description }),
@@ -205,24 +257,27 @@ function createTaskBody(input: CreateTaskInput): Record<string, unknown> {
       : { assignees: input.assignees.map(numericId) }),
     ...(input.tags === undefined ? {} : { tags: input.tags }),
     ...(input.status === undefined ? {} : { status: input.status }),
-    ...(input.priority === undefined ? {} : { priority: Number(input.priority) }),
+    ...(input.priority === undefined ? {} : { priority: PRIORITY_VALUES[input.priority] }),
     ...(input.due_date === undefined ? {} : { due_date: timestamp(input.due_date) }),
     ...(input.due_date_time === undefined ? {} : { due_date_time: input.due_date_time }),
-    ...(input.time_estimate_ms === undefined ? {} : { time_estimate: input.time_estimate_ms }),
+    ...(input.time_estimate === undefined
+      ? {}
+      : { time_estimate: input.time_estimate * MINUTE_MS }),
     ...(input.start_date === undefined ? {} : { start_date: timestamp(input.start_date) }),
     ...(input.start_date_time === undefined ? {} : { start_date_time: input.start_date_time }),
     ...(input.notify_all === undefined ? {} : { notify_all: input.notify_all }),
     ...(input.parent === undefined ? {} : { parent: input.parent }),
-    ...(input.custom_item_id === undefined
-      ? {}
-      : { custom_item_id: numericId(input.custom_item_id) }),
+    ...(customItemId === undefined ? {} : { custom_item_id: numericId(customItemId) }),
     ...(input.check_required_custom_fields === undefined
       ? {}
       : { check_required_custom_fields: input.check_required_custom_fields }),
   };
 }
 
-function updateTaskBody(input: UpdateTaskInput): Record<string, unknown> {
+function updateTaskBody(
+  input: UpdateTaskInput,
+  customItemId: string | null | undefined,
+): Record<string, unknown> {
   return {
     ...(input.name === undefined ? {} : { name: input.name }),
     ...(input.description === undefined ? {} : { description: input.description }),
@@ -232,12 +287,12 @@ function updateTaskBody(input: UpdateTaskInput): Record<string, unknown> {
     ...(input.status === undefined ? {} : { status: input.status }),
     ...(input.priority === undefined
       ? {}
-      : { priority: input.priority === null ? null : Number(input.priority) }),
+      : { priority: input.priority === null ? null : PRIORITY_VALUES[input.priority] }),
     ...(input.due_date === undefined ? {} : { due_date: timestamp(input.due_date) }),
     ...(input.due_date_time === undefined ? {} : { due_date_time: input.due_date_time }),
-    ...(input.time_estimate_ms === undefined
+    ...(input.time_estimate === undefined
       ? {}
-      : { time_estimate: input.time_estimate_ms }),
+      : { time_estimate: input.time_estimate === null ? null : input.time_estimate * MINUTE_MS }),
     ...(input.start_date === undefined ? {} : { start_date: timestamp(input.start_date) }),
     ...(input.start_date_time === undefined ? {} : { start_date_time: input.start_date_time }),
     ...(input.assignees === undefined
@@ -252,25 +307,55 @@ function updateTaskBody(input: UpdateTaskInput): Record<string, unknown> {
               : { rem: input.assignees.rem.map(numericId) }),
           },
         }),
+    ...(customItemId === undefined
+      ? {}
+      : { custom_item_id: customItemId === null ? null : numericId(customItemId) }),
     ...(input.archived === undefined ? {} : { archived: input.archived }),
   };
 }
 
-async function createTask(dependencies: ToolDependencies, input: CreateTaskInput): Promise<unknown> {
+async function createTask(
+  dependencies: ToolDependencies,
+  input: CreateTaskInput,
+  taskTypes: TaskTypeResolver = createTaskTypeResolver(dependencies),
+): Promise<unknown> {
+  const customItemId =
+    input.task_type === undefined
+      ? undefined
+      : (
+          await taskTypes.resolveOne(
+            dependencies.client.requireWorkspaceId(input.workspace_id),
+            input.task_type,
+          )
+        ).id;
   return dependencies.client.request({
     path: `/list/${encodeURIComponent(input.list_id)}/task`,
     method: 'POST',
-    body: createTaskBody(input),
+    body: createTaskBody(input, customItemId),
   });
 }
 
-async function updateTask(dependencies: ToolDependencies, input: UpdateTaskInput): Promise<unknown> {
+async function updateTask(
+  dependencies: ToolDependencies,
+  input: UpdateTaskInput,
+  taskTypes: TaskTypeResolver = createTaskTypeResolver(dependencies),
+): Promise<unknown> {
   const query = taskQuery(dependencies, input);
+  // A null task type is ClickUp's documented reset to the built-in Task type.
+  const customItemId =
+    input.task_type === undefined || input.task_type === null
+      ? input.task_type
+      : (
+          await taskTypes.resolveOne(
+            dependencies.client.requireWorkspaceId(input.workspace_id),
+            input.task_type,
+          )
+        ).id;
   return dependencies.client.request({
     path: `/task/${encodeURIComponent(input.task_id)}`,
     method: 'PUT',
     query,
-    body: updateTaskBody(input),
+    body: updateTaskBody(input, customItemId),
   });
 }
 
@@ -583,6 +668,7 @@ export const TASK_TOOL_NAMES = [
   'update_task',
   'set_task_custom_fields',
   'delete_task',
+  'merge_tasks',
   'create_bulk_tasks',
   'update_bulk_tasks',
 ] as const;
@@ -868,6 +954,65 @@ export function registerTaskTools(server: McpServer, dependencies: ToolDependenc
   });
 
   registerClickUpTool(server, dependencies, {
+    name: 'merge_tasks',
+    title: 'Merge Tasks',
+    description: 'Preview or explicitly confirm merging source Tasks into one target Task.',
+    inputSchema: MergeTasksInputSchema,
+    annotations: mutatingAnnotations,
+    handler: async (input) => {
+      const payload = {
+        target_task_id: input.target_task_id,
+        source_task_ids: input.source_task_ids,
+      };
+      if (input.dry_run) {
+        return {
+          data: {
+            dry_run: true,
+            ...payload,
+            destructive_writes_enabled: dependencies.config.enableDestructive,
+            confirmation_token: dependencies.confirmations.create(
+              'merge_tasks',
+              input.target_task_id,
+              payload,
+            ),
+            confirmation_expires_in_seconds: 600,
+          },
+          summary: `Merge preview generated for ${input.source_task_ids.length} source Task(s); no Tasks were merged.`,
+        };
+      }
+      if (!dependencies.config.enableDestructive) {
+        throw new ToolFailure(
+          'DESTRUCTIVE_WRITES_DISABLED',
+          'Task merging requires CLICKUP_ENABLE_DESTRUCTIVE=true.',
+          false,
+        );
+      }
+      if (!input.confirm || input.confirmation_token === undefined) {
+        throw new ToolFailure(
+          'CONFIRMATION_REQUIRED',
+          'Task merging requires confirm=true and the confirmation_token from a preview.',
+          false,
+        );
+      }
+      dependencies.confirmations.verifyAndConsume(
+        input.confirmation_token,
+        'merge_tasks',
+        input.target_task_id,
+        payload,
+      );
+      const response = await dependencies.client.request({
+        path: `/task/${encodeURIComponent(input.target_task_id)}/merge`,
+        method: 'POST',
+        body: { source_task_ids: input.source_task_ids },
+      });
+      return {
+        data: { merged: true, ...payload, response },
+        summary: `Merged ${input.source_task_ids.length} source Task(s) into ${input.target_task_id}.`,
+      };
+    },
+  });
+
+  registerClickUpTool(server, dependencies, {
     name: 'create_bulk_tasks',
     title: 'Create tasks in bulk',
     description: 'Preview or create multiple tasks with bounded concurrency and per-item results.',
@@ -888,7 +1033,10 @@ export function registerTaskTools(server: McpServer, dependencies: ToolDependenc
         input.confirm,
         input.confirmation_token,
       );
-      const data = await bulkResults(input.items, async (item) => createTask(dependencies, item));
+      const taskTypes = createTaskTypeResolver(dependencies);
+      const data = await bulkResults(input.items, async (item) =>
+        createTask(dependencies, item, taskTypes),
+      );
       return { data, summary: `Bulk create finished: ${data.succeeded} succeeded, ${data.failed} failed.` };
     },
   });
@@ -914,7 +1062,10 @@ export function registerTaskTools(server: McpServer, dependencies: ToolDependenc
         input.confirm,
         input.confirmation_token,
       );
-      const data = await bulkResults(input.items, async (item) => updateTask(dependencies, item));
+      const taskTypes = createTaskTypeResolver(dependencies);
+      const data = await bulkResults(input.items, async (item) =>
+        updateTask(dependencies, item, taskTypes),
+      );
       return { data, summary: `Bulk update finished: ${data.succeeded} succeeded, ${data.failed} failed.` };
     },
   });

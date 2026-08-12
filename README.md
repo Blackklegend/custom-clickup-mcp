@@ -52,8 +52,8 @@ Any client that supports MCP over `stdio` can launch the same command. The SDK s
 | --- | --- | --- | --- |
 | `CLICKUP_API_TOKEN` | yes | — | Personal ClickUp API token. Never logged or persisted. |
 | `CLICKUP_DEFAULT_WORKSPACE_ID` | no | — | Default Workspace when a tool does not receive `workspace_id`. |
-| `CLICKUP_TOOL_PROFILE` | no | `full` | Tool catalog: all 32 tools with `full`, or the compact common-workflow catalog with `core`. |
-| `CLICKUP_ENABLE_DESTRUCTIVE` | no | `false` | Allows confirmed Task deletion and Custom Field value removal. |
+| `CLICKUP_TOOL_PROFILE` | no | `full` | Tool catalog: all 40 tools with `full`, or the compact common-workflow catalog with `core`. |
+| `CLICKUP_ENABLE_DESTRUCTIVE` | no | `false` | Allows confirmed Task/comment deletion, task merging, and Custom Field value removal. |
 | `CLICKUP_ENABLE_BULK_WRITES` | no | `false` | Allows confirmed bulk task writes and multi-field Custom Field writes. |
 | `CLICKUP_BULK_MAX_ITEMS` | no | `25` | Per-call bulk limit; maximum allowed value is 100. |
 | `CLICKUP_SEARCH_MAX_PAGES` | no | `5` | Default Task pages scanned; maximum allowed value is 20. |
@@ -63,7 +63,7 @@ Any client that supports MCP over `stdio` can launch the same command. The SDK s
 
 ## Tools
 
-The default `full` profile exposes exactly 32 tools in P0. Set
+The default `full` profile exposes exactly 40 tools in P0. Set
 `CLICKUP_TOOL_PROFILE=core` to expose only the common search, Task, comment, Tag,
 hierarchy, and assignee-resolution workflow. The compact profile contains 14 tools and
 reduces the tool-discovery payload without changing any tool's request or response shape.
@@ -71,10 +71,11 @@ reduces the tool-discovery payload without changing any tool's request or respon
 ### Search
 
 - `search_workspace`
-- `search_tasks_by_task_type`
-- `search_tasks_by_tag`
+- `filter_tasks`
 
 `search_workspace` performs a bounded API sweep over Tasks, Spaces, Folders, and Lists. It does not search Docs. A truncated result includes a continuation cursor and scan counters; it never walks an unbounded Workspace implicitly.
+
+`filter_tasks` composes tags, statuses, assignees, List/Folder/Space scopes, due and completion date ranges, task types, subtask inclusion, and sorting in one server-side request. Arrays are OR within one dimension and dimensions are ANDed. Like the other searches, each call is bounded by `limit` and `max_pages` and returns a continuation cursor when truncated.
 
 ### Task management
 
@@ -82,7 +83,9 @@ reduces the tool-discovery payload without changing any tool's request or respon
 - `get_task`
 - `update_task`
 - `set_task_custom_fields`
+- `get_custom_fields`
 - `delete_task`
+- `merge_tasks`
 - `create_bulk_tasks`
 - `update_bulk_tasks`
 
@@ -91,11 +94,52 @@ reduces the tool-discovery payload without changing any tool's request or respon
 `markdown_description` to ClickUp's upstream `markdown_content` field. The same input
 contract applies to items in `create_bulk_tasks` and `update_bulk_tasks`.
 
+`time_estimate` is expressed in minutes; the server converts it to the milliseconds ClickUp
+expects. `update_task` clears an estimate when it receives an explicit `null`.
+
+`priority` accepts either a ClickUp label (`urgent`, `high`, `normal`, `low`) or the matching
+wire number (`1` through `4`). The scale is fixed at those four values in every Workspace.
+`update_task` clears a priority when it receives an explicit `null`.
+
+`create_task` and `update_task` accept `task_type` as either a `custom_item_id` such as `7` or
+a display name such as `Bug`, matched case-insensitively against the Workspace task types plus
+the built-in `Task` and `Milestone`. An unmatched or ambiguous name fails with
+`TASK_TYPE_NOT_FOUND` or `TASK_TYPE_AMBIGUOUS`, lists the candidates, and writes nothing.
+`update_task` resets a task to the built-in `Task` type when it receives an explicit `null`.
+Resolution needs a Workspace, so pass `workspace_id` when `CLICKUP_DEFAULT_WORKSPACE_ID` is
+unset; a bulk call resolves the type list once for every item.
+
+`get_custom_fields` accepts a Task, List, Folder, Space, or Workspace location and returns
+field IDs, types, applicability metadata, and dropdown/label option UUIDs. Task-scoped
+discovery automatically resolves the home List and excludes fields that do not apply to
+the Task's custom task type.
+
+### Attachments
+
+- `request_attachment_upload`
+- `attach_task_file`
+- `download_task_attachment`
+
+Uploads use a two-step flow: stage an explicit local file path, a base64 payload, or an
+HTTPS URL (optionally with an `Authorization` header),
+then pass the short-lived `upload_id` to `attach_task_file`. Staged payloads expire after
+ten minutes, are consumed only after a successful multipart upload, and are limited to
+25 MiB to keep MCP messages and process memory bounded. Downloads can return ClickUp's
+signed URL or write the file to an explicit local path; existing files are preserved unless
+`overwrite: true` is supplied.
+
 ### Comments
 
 - `get_task_comments`
 - `get_threaded_replies`
+- `create_comment`
 - `create_task_comment`
+- `update_comment`
+- `delete_comment`
+
+`create_comment` targets a Task, List, or Chat view, can create a threaded reply with
+`reply_to_id`, and supports user or group assignment. `create_task_comment` remains as a
+compatibility tool for its original Task-only contract.
 
 ### Tags
 
@@ -113,8 +157,9 @@ contract applies to items in `create_bulk_tasks` and `update_bulk_tasks`.
 
 - `move_task_to_list`
 - `add_task_to_list`
+- `remove_task_from_list`
 
-`add_task_to_list` requires the ClickUp **Tasks in Multiple Lists** ClickApp.
+`add_task_to_list` and `remove_task_from_list` require the ClickUp **Tasks in Multiple Lists** ClickApp. The removal tool refuses to remove a Task from its home List.
 
 ### Workspace hierarchy
 
@@ -137,7 +182,7 @@ Member resolution returns candidates instead of choosing automatically when a na
 
 ## Safe writes
 
-Task deletion, Custom Field removals, and multi-item writes use a two-step flow:
+Task/comment deletion, task merging, Custom Field removals, and multi-item writes use a two-step flow:
 
 1. Call the tool with `dry_run: true` to receive the exact preview and a short-lived confirmation token.
 2. Enable the relevant environment flag and call again with the unchanged payload, `dry_run: false`, `confirm: true`, and the confirmation token.

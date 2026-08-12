@@ -7,7 +7,8 @@ import { registerMoveTools } from '../src/tools/move.js';
 import type { ToolDependencies } from '../src/tools/types.js';
 
 interface ToolResult {
-  structuredContent?: { data?: unknown };
+  isError?: boolean;
+  structuredContent?: { data?: unknown; error?: { code?: string } };
 }
 type ToolHandler = (input: Record<string, unknown>) => Promise<ToolResult>;
 
@@ -89,5 +90,28 @@ describe('move tools', () => {
         home_list_preserved: true,
       },
     });
+  });
+
+  it('removes a Task from an additional List but rejects its home List', async () => {
+    const removable = harness([{ list: { id: 'home-list' } }, {}]);
+    await removable.call('remove_task_from_list', {
+      task_id: 'task-1',
+      list_id: 'extra-list',
+    });
+    expect(removable.request).toHaveBeenNthCalledWith(2, {
+      path: '/list/extra-list/task/task-1',
+      method: 'DELETE',
+    });
+
+    const home = harness([{ list: { id: 'home-list' } }]);
+    const rejected = await home.call('remove_task_from_list', {
+      task_id: 'task-1',
+      list_id: 'home-list',
+    });
+    expect(rejected).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CANNOT_REMOVE_HOME_LIST' } },
+    });
+    expect(home.request).toHaveBeenCalledTimes(1);
   });
 });

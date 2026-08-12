@@ -7,8 +7,9 @@ import type {
 } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
-import { normalizeError } from '../errors.js';
-import { isRecord } from '../utils/json.js';
+import { ToolFailure, normalizeError } from '../errors.js';
+import { asArray, asRecord, isRecord, stringId, stringValue } from '../utils/json.js';
+import { normalizeSearchText } from '../utils/text.js';
 import { toolIsEnabled } from './catalog.js';
 import type { ToolDependencies } from './types.js';
 
@@ -38,6 +39,122 @@ export function taskQuery(
     custom_task_ids: true,
     team_id: dependencies.client.requireWorkspaceId(input.workspace_id),
   };
+}
+
+export type TaskType = { id: string; name?: string };
+
+// ClickUp serves these two from every Workspace but omits them from `/custom_item`.
+const BUILT_IN_TASK_TYPES: readonly TaskType[] = [
+  { id: '0', name: 'Task' },
+  { id: '1', name: 'Milestone' },
+];
+
+async function fetchTaskTypeCandidates(
+  dependencies: Pick<ToolDependencies, 'client'>,
+  workspaceId: string,
+): Promise<TaskType[]> {
+  const response = asRecord(
+    await dependencies.client.request({
+      path: `/team/${encodeURIComponent(workspaceId)}/custom_item`,
+    }),
+    'custom task types response',
+  );
+  const customCandidates = asArray(response.custom_items ?? response.custom_item_types).flatMap(
+    (value) => {
+      if (!isRecord(value)) return [];
+      const id = stringId(value.id);
+      if (id === undefined) return [];
+      const name = stringValue(value.name);
+      return [{ id, ...(name === undefined ? {} : { name }) }];
+    },
+  );
+  return [
+    ...BUILT_IN_TASK_TYPES,
+    ...customCandidates.filter(({ id }) => id !== '0' && id !== '1'),
+  ];
+}
+
+function matchTaskType(candidates: readonly TaskType[], requestedType: string): TaskType {
+  const normalized = normalizeSearchText(requestedType);
+  const matches = candidates.filter(
+    (candidate) =>
+      normalizeSearchText(candidate.id) === normalized ||
+      (candidate.name !== undefined && normalizeSearchText(candidate.name) === normalized),
+  );
+  if (matches.length === 0) {
+    throw new ToolFailure('TASK_TYPE_NOT_FOUND', `No task type matched ${requestedType}.`, false, {
+      candidates,
+    });
+  }
+  if (matches.length > 1 || matches[0] === undefined) {
+    throw new ToolFailure(
+      'TASK_TYPE_AMBIGUOUS',
+      `More than one task type matched ${requestedType}.`,
+      false,
+      { candidates: matches },
+    );
+  }
+  return matches[0];
+}
+
+export interface TaskTypeResolver {
+  resolveMany(workspaceId: string, requestedTypes: readonly string[]): Promise<TaskType[]>;
+  resolveOne(workspaceId: string, requestedType: string): Promise<TaskType>;
+}
+
+/**
+ * Resolves task types supplied either as a ClickUp `custom_item_id` or as a display name
+ * such as `Bug`. The candidate list is fetched at most once per Workspace per resolver, so
+ * a bulk call costs one lookup instead of one per item.
+ */
+export function createTaskTypeResolver(
+  dependencies: Pick<ToolDependencies, 'client'>,
+): TaskTypeResolver {
+  const candidatesByWorkspace = new Map<string, Promise<TaskType[]>>();
+  const candidatesFor = async (workspaceId: string): Promise<TaskType[]> => {
+    const cached = candidatesByWorkspace.get(workspaceId);
+    if (cached !== undefined) return cached;
+    const pending = fetchTaskTypeCandidates(dependencies, workspaceId);
+    candidatesByWorkspace.set(workspaceId, pending);
+    return pending;
+  };
+  const resolveMany = async (
+    workspaceId: string,
+    requestedTypes: readonly string[],
+  ): Promise<TaskType[]> => {
+    const candidates = await candidatesFor(workspaceId);
+    return requestedTypes.map((requestedType) => matchTaskType(candidates, requestedType));
+  };
+  return {
+    resolveMany,
+    async resolveOne(workspaceId: string, requestedType: string): Promise<TaskType> {
+      const [taskType] = await resolveMany(workspaceId, [requestedType]);
+      if (taskType === undefined) {
+        throw new ToolFailure(
+          'TASK_TYPE_NOT_FOUND',
+          `No task type matched ${requestedType}.`,
+          false,
+        );
+      }
+      return taskType;
+    },
+  };
+}
+
+export async function resolveTaskTypes(
+  dependencies: Pick<ToolDependencies, 'client'>,
+  workspaceId: string,
+  requestedTypes: readonly string[],
+): Promise<TaskType[]> {
+  return createTaskTypeResolver(dependencies).resolveMany(workspaceId, requestedTypes);
+}
+
+export async function resolveTaskType(
+  dependencies: Pick<ToolDependencies, 'client'>,
+  workspaceId: string,
+  requestedType: string,
+): Promise<TaskType> {
+  return createTaskTypeResolver(dependencies).resolveOne(workspaceId, requestedType);
 }
 
 export async function mapConcurrent<T, R>(

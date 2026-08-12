@@ -1,10 +1,17 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
+import type { QueryValue } from '../clickup/client.js';
 import { ToolFailure } from '../errors.js';
 import { asArray, asRecord, isRecord, stringId, stringValue } from '../utils/json.js';
 import { includesNormalized, normalizeSearchText } from '../utils/text.js';
-import { readOnlyAnnotations, registerClickUpTool } from './shared.js';
+import {
+  DateTimeSchema,
+  NumericIdSchema,
+  readOnlyAnnotations,
+  registerClickUpTool,
+  resolveTaskTypes,
+} from './shared.js';
 import type { ToolDependencies } from './types.js';
 import { getWorkspaceHierarchyData } from './workspace.js';
 
@@ -29,12 +36,45 @@ const SearchWorkspaceSchema = z
       .default(['task', 'space', 'folder', 'list']),
   })
   .strict();
-const SearchByTypeSchema = z
-  .object({ ...SearchPagingFields, task_type: z.string().trim().min(1).max(255) })
-  .strict();
-const SearchByTagSchema = z
-  .object({ ...SearchPagingFields, tag: z.string().trim().min(1).max(255) })
-  .strict();
+const FilterTasksSchema = z
+  .object({
+    ...SearchPagingFields,
+    tags: z.array(z.string().trim().min(1).max(255)).min(1).max(100).optional(),
+    statuses: z.array(z.string().trim().min(1).max(100)).min(1).max(100).optional(),
+    assignees: z.array(NumericIdSchema).min(1).max(100).optional(),
+    list_ids: z.array(NumericIdSchema).min(1).max(100).optional(),
+    folder_ids: z.array(NumericIdSchema).min(1).max(100).optional(),
+    space_ids: z.array(NumericIdSchema).min(1).max(100).optional(),
+    due_date_from: DateTimeSchema.optional(),
+    due_date_to: DateTimeSchema.optional(),
+    completion_date_from: DateTimeSchema.optional(),
+    completion_date_to: DateTimeSchema.optional(),
+    task_types: z.array(z.string().trim().min(1).max(255)).min(1).max(100).optional(),
+    subtasks: z.boolean().optional().default(true),
+    order_by: z.enum(['id', 'created', 'updated', 'due_date']).optional(),
+    reverse: z.boolean().optional(),
+  })
+  .strict()
+  .superRefine((input, context) => {
+    const ranges = [
+      ['due_date_from', input.due_date_from, 'due_date_to', input.due_date_to],
+      [
+        'completion_date_from',
+        input.completion_date_from,
+        'completion_date_to',
+        input.completion_date_to,
+      ],
+    ] as const;
+    for (const [fromName, from, toName, to] of ranges) {
+      if (from !== undefined && to !== undefined && Date.parse(from) >= Date.parse(to)) {
+        context.addIssue({
+          code: 'custom',
+          path: [toName],
+          message: `${toName} must be later than ${fromName}.`,
+        });
+      }
+    }
+  });
 
 interface CursorPayload {
   version: 1;
@@ -52,6 +92,10 @@ interface SearchItem {
   url?: string;
   custom_item_id?: string;
   tags?: string[];
+  status?: string;
+  assignee_ids?: string[];
+  due_date?: number;
+  completion_date?: number;
 }
 
 function encodeCursor(cursor: CursorPayload): string {
@@ -102,6 +146,11 @@ function taskItem(candidate: unknown): SearchItem | undefined {
   const description = stringValue(candidate.description);
   const url = stringValue(candidate.url);
   const customItemId = candidate.custom_item_id === null ? '0' : stringId(candidate.custom_item_id);
+  const status = isRecord(candidate.status)
+    ? stringValue(candidate.status.status)
+    : stringValue(candidate.status);
+  const dueDate = timestampValue(candidate.due_date);
+  const completionDate = timestampValue(candidate.date_done);
   return {
     type: 'task',
     id,
@@ -110,11 +159,29 @@ function taskItem(candidate: unknown): SearchItem | undefined {
     ...(Object.keys(location).length === 0 ? {} : { location }),
     ...(url === undefined ? {} : { url }),
     ...(customItemId === undefined ? {} : { custom_item_id: customItemId }),
+    ...(status === undefined ? {} : { status }),
+    assignee_ids: asArray(candidate.assignees).flatMap((assignee) => {
+      if (typeof assignee === 'string' || typeof assignee === 'number') {
+        const id = stringId(assignee);
+        return id === undefined ? [] : [id];
+      }
+      const id = isRecord(assignee) ? stringId(assignee.id) : undefined;
+      return id === undefined ? [] : [id];
+    }),
+    ...(dueDate === undefined ? {} : { due_date: dueDate }),
+    ...(completionDate === undefined ? {} : { completion_date: completionDate }),
     tags: asArray(candidate.tags).flatMap((tag) => {
       if (typeof tag === 'string') return [tag];
       return isRecord(tag) && typeof tag.name === 'string' ? [tag.name] : [];
     }),
   };
+}
+
+function timestampValue(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string' || value.trim().length === 0) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function taskMatchesQuery(task: SearchItem, normalizedQuery: string): boolean {
@@ -184,7 +251,8 @@ interface TaskSweepOptions {
   cursor: CursorPayload;
   limit: number;
   maxPages: number;
-  query?: Record<string, string | readonly string[]>;
+  subtasks?: boolean;
+  query?: Record<string, QueryValue>;
   predicate(task: SearchItem): boolean;
 }
 
@@ -211,7 +279,7 @@ async function sweepTasks(
         query: {
           page,
           include_closed: options.includeClosed,
-          subtasks: true,
+          subtasks: options.subtasks ?? true,
           ...options.query,
         },
       }),
@@ -258,46 +326,84 @@ async function sweepTasks(
   };
 }
 
-async function resolveTaskType(
-  dependencies: ToolDependencies,
-  workspaceId: string,
-  requestedType: string,
-): Promise<{ id: string; name?: string }> {
-  const response = asRecord(
-    await dependencies.client.request({
-      path: `/team/${encodeURIComponent(workspaceId)}/custom_item`,
-    }),
-    'custom task types response',
-  );
-  const customCandidates = asArray(response.custom_items ?? response.custom_item_types).flatMap((value) => {
-    if (!isRecord(value)) return [];
-    const id = stringId(value.id);
-    if (id === undefined) return [];
-    const name = stringValue(value.name);
-    return [{ id, ...(name === undefined ? {} : { name }) }];
-  });
-  const candidates = [
-    { id: '0', name: 'Task' },
-    { id: '1', name: 'Milestone' },
-    ...customCandidates.filter(({ id }) => id !== '0' && id !== '1'),
-  ];
-  const normalized = normalizeSearchText(requestedType);
-  const matches = candidates.filter(
-    (candidate) =>
-      normalizeSearchText(candidate.id) === normalized ||
-      (candidate.name !== undefined && normalizeSearchText(candidate.name) === normalized),
-  );
-  if (matches.length === 0) {
-    throw new ToolFailure('TASK_TYPE_NOT_FOUND', `No task type matched ${requestedType}.`, false, {
-      candidates,
-    });
-  }
-  if (matches.length > 1 || matches[0] === undefined) {
-    throw new ToolFailure('TASK_TYPE_AMBIGUOUS', `More than one task type matched ${requestedType}.`, false, {
-      candidates: matches,
-    });
-  }
-  return matches[0];
+interface FilterPredicateOptions {
+  tags?: readonly string[] | undefined;
+  statuses?: readonly string[] | undefined;
+  assignees?: readonly string[] | undefined;
+  listIds?: readonly string[] | undefined;
+  folderIds?: readonly string[] | undefined;
+  spaceIds?: readonly string[] | undefined;
+  taskTypeIds?: readonly string[] | undefined;
+  dueDateFrom?: number | undefined;
+  dueDateTo?: number | undefined;
+  completionDateFrom?: number | undefined;
+  completionDateTo?: number | undefined;
+}
+
+function normalizedSet(values: readonly string[] | undefined): Set<string> | undefined {
+  return values === undefined
+    ? undefined
+    : new Set(values.map((value) => normalizeSearchText(value)));
+}
+
+function idSet(values: readonly string[] | undefined): Set<string> | undefined {
+  return values === undefined ? undefined : new Set(values);
+}
+
+function taskFilterPredicate(filters: FilterPredicateOptions): (task: SearchItem) => boolean {
+  const tags = normalizedSet(filters.tags);
+  const statuses = normalizedSet(filters.statuses);
+  const assignees = idSet(filters.assignees);
+  const listIds = idSet(filters.listIds);
+  const folderIds = idSet(filters.folderIds);
+  const spaceIds = idSet(filters.spaceIds);
+  const taskTypeIds = idSet(filters.taskTypeIds);
+  return (task) => {
+    if (
+      tags !== undefined &&
+      !(task.tags?.some((tag) => tags.has(normalizeSearchText(tag))) ?? false)
+    ) return false;
+    if (
+      statuses !== undefined &&
+      (task.status === undefined || !statuses.has(normalizeSearchText(task.status)))
+    ) return false;
+    if (
+      assignees !== undefined &&
+      !(task.assignee_ids?.some((assignee) => assignees.has(assignee)) ?? false)
+    ) return false;
+    const scopes = [
+      [listIds, task.location?.list_id],
+      [folderIds, task.location?.folder_id],
+      [spaceIds, task.location?.space_id],
+    ] as const;
+    if (
+      scopes.some(
+        ([allowed, actual]) =>
+          allowed !== undefined && (actual === undefined || !allowed.has(actual)),
+      )
+    ) return false;
+    if (
+      taskTypeIds !== undefined &&
+      (task.custom_item_id === undefined || !taskTypeIds.has(task.custom_item_id))
+    ) return false;
+    if (
+      filters.dueDateFrom !== undefined &&
+      (task.due_date ?? Number.NEGATIVE_INFINITY) <= filters.dueDateFrom
+    ) return false;
+    if (
+      filters.dueDateTo !== undefined &&
+      (task.due_date ?? Number.POSITIVE_INFINITY) >= filters.dueDateTo
+    ) return false;
+    if (
+      filters.completionDateFrom !== undefined &&
+      (task.completion_date ?? Number.NEGATIVE_INFINITY) <= filters.completionDateFrom
+    ) return false;
+    if (
+      filters.completionDateTo !== undefined &&
+      (task.completion_date ?? Number.POSITIVE_INFINITY) >= filters.completionDateTo
+    ) return false;
+    return true;
+  };
 }
 
 export function registerSearchTools(server: McpServer, dependencies: ToolDependencies): void {
@@ -388,52 +494,70 @@ export function registerSearchTools(server: McpServer, dependencies: ToolDepende
   });
 
   registerClickUpTool(server, dependencies, {
-    name: 'search_tasks_by_task_type',
-    title: 'Search Tasks by Task Type',
-    description: 'Retrieve accessible ClickUp Tasks matching one custom task type.',
-    inputSchema: SearchByTypeSchema,
+    name: 'filter_tasks',
+    title: 'Filter Tasks',
+    description:
+      'Retrieve Tasks using composable server-side filters. Arrays are OR within a filter and filters are ANDed. Work is bounded by limit and max_pages.',
+    inputSchema: FilterTasksSchema,
     annotations: readOnlyAnnotations,
     handler: async (input) => {
       const workspaceId = dependencies.client.requireWorkspaceId(input.workspace_id);
-      const taskType = await resolveTaskType(dependencies, workspaceId, input.task_type);
+      const taskTypes = input.task_types === undefined
+        ? undefined
+        : await resolveTaskTypes(dependencies, workspaceId, input.task_types);
+      const dueDateFrom = input.due_date_from === undefined ? undefined : Date.parse(input.due_date_from);
+      const dueDateTo = input.due_date_to === undefined ? undefined : Date.parse(input.due_date_to);
+      const completionDateFrom = input.completion_date_from === undefined
+        ? undefined
+        : Date.parse(input.completion_date_from);
+      const completionDateTo = input.completion_date_to === undefined
+        ? undefined
+        : Date.parse(input.completion_date_to);
+      const query = {
+        ...(input.tags === undefined ? {} : { tags: input.tags }),
+        ...(input.statuses === undefined ? {} : { statuses: input.statuses }),
+        ...(input.assignees === undefined ? {} : { assignees: input.assignees }),
+        ...(input.list_ids === undefined ? {} : { list_ids: input.list_ids }),
+        ...(input.folder_ids === undefined ? {} : { project_ids: input.folder_ids }),
+        ...(input.space_ids === undefined ? {} : { space_ids: input.space_ids }),
+        ...(dueDateFrom === undefined ? {} : { due_date_gt: dueDateFrom }),
+        ...(dueDateTo === undefined ? {} : { due_date_lt: dueDateTo }),
+        ...(completionDateFrom === undefined ? {} : { date_done_gt: completionDateFrom }),
+        ...(completionDateTo === undefined ? {} : { date_done_lt: completionDateTo }),
+        ...(taskTypes === undefined ? {} : { custom_items: taskTypes.map(({ id }) => id) }),
+        ...(input.order_by === undefined ? {} : { order_by: input.order_by }),
+        ...(input.reverse === undefined ? {} : { reverse: input.reverse }),
+      };
       const result = await sweepTasks(dependencies, {
         workspaceId,
         includeClosed: input.include_closed,
         cursor: decodeCursor(input.cursor, 'tasks', ['tasks']),
         limit: input.limit,
         maxPages: Math.min(input.max_pages ?? dependencies.config.searchMaxPages, dependencies.config.searchMaxPages),
-        query: { custom_items: [taskType.id] },
-        predicate: (task) => task.custom_item_id === taskType.id,
+        subtasks: input.subtasks,
+        query,
+        predicate: taskFilterPredicate({
+          tags: input.tags,
+          statuses: input.statuses,
+          assignees: input.assignees,
+          listIds: input.list_ids,
+          folderIds: input.folder_ids,
+          spaceIds: input.space_ids,
+          taskTypeIds: taskTypes?.map(({ id }) => id),
+          dueDateFrom,
+          dueDateTo,
+          completionDateFrom,
+          completionDateTo,
+        }),
       });
       return {
-        data: { task_type: taskType, ...result },
-        summary: `Found ${result.items.length} Tasks with task type ${taskType.name ?? taskType.id}.`,
+        data: {
+          ...(taskTypes === undefined ? {} : { task_types: taskTypes }),
+          ...result,
+        },
+        summary: `Found ${result.items.length} Tasks matching the composed filters${result.truncated ? '; results are partial' : ''}.`,
       };
     },
   });
 
-  registerClickUpTool(server, dependencies, {
-    name: 'search_tasks_by_tag',
-    title: 'Search Tasks by Tag',
-    description: 'Retrieve accessible ClickUp Tasks with an exact tag.',
-    inputSchema: SearchByTagSchema,
-    annotations: readOnlyAnnotations,
-    handler: async (input) => {
-      const workspaceId = dependencies.client.requireWorkspaceId(input.workspace_id);
-      const normalizedTag = normalizeSearchText(input.tag);
-      const result = await sweepTasks(dependencies, {
-        workspaceId,
-        includeClosed: input.include_closed,
-        cursor: decodeCursor(input.cursor, 'tasks', ['tasks']),
-        limit: input.limit,
-        maxPages: Math.min(input.max_pages ?? dependencies.config.searchMaxPages, dependencies.config.searchMaxPages),
-        query: { tags: [input.tag] },
-        predicate: (task) => task.tags?.some((tag) => normalizeSearchText(tag) === normalizedTag) ?? false,
-      });
-      return {
-        data: { tag: input.tag, ...result },
-        summary: `Found ${result.items.length} Tasks tagged ${input.tag}.`,
-      };
-    },
-  });
 }

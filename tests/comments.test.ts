@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { ClickUpRequest } from '../src/clickup/client.js';
 import { noopLogger } from '../src/logging.js';
+import { ConfirmationService } from '../src/policies/confirmation.js';
 import { registerCommentTools } from '../src/tools/comments.js';
 import type { ToolDependencies } from '../src/tools/types.js';
 
@@ -13,7 +14,7 @@ interface ToolResult {
 
 type ToolHandler = (input: Record<string, unknown>) => Promise<ToolResult>;
 
-function harness(responses: unknown[]) {
+function harness(responses: unknown[], enableDestructive = false) {
   const handlers = new Map<string, ToolHandler>();
   const request = vi.fn<(request: ClickUpRequest) => Promise<unknown>>();
   for (const response of responses) request.mockResolvedValueOnce(response);
@@ -26,7 +27,8 @@ function harness(responses: unknown[]) {
   const dependencies = {
     client: { request, requireWorkspaceId },
     logger: noopLogger,
-    config: { enableDestructive: false },
+    config: { enableDestructive },
+    confirmations: new ConfirmationService(),
   } as unknown as ToolDependencies;
   registerCommentTools(server, dependencies);
   const call = async (name: string, input: Record<string, unknown>) => {
@@ -108,6 +110,72 @@ describe('comment tools', () => {
     });
   });
 
+  it('creates comments on Tasks, Lists, and Chat views through the generic tool', async () => {
+    const { call, request } = harness([{ id: '1' }, { id: '2' }, { id: '3' }]);
+
+    await call('create_comment', {
+      target: 'task',
+      target_id: 'TASK-1',
+      custom_task_ids: true,
+      workspace_id: '99',
+      comment_text: 'Task note',
+      assignee: '183',
+    });
+    await call('create_comment', {
+      target: 'list',
+      target_id: 'list/1',
+      comment_text: 'List note',
+      assignee: '184',
+    });
+    await call('create_comment', {
+      target: 'view',
+      target_id: 'view/1',
+      comment_text: 'View note',
+    });
+
+    expect(request).toHaveBeenNthCalledWith(1, {
+      path: '/task/TASK-1/comment',
+      method: 'POST',
+      query: { custom_task_ids: true, team_id: '99' },
+      body: {
+        comment_text: 'Task note',
+        assignee: 183,
+        notify_all: false,
+      },
+    });
+    expect(request).toHaveBeenNthCalledWith(2, {
+      path: '/list/list%2F1/comment',
+      method: 'POST',
+      body: { comment_text: 'List note', assignee: 184, notify_all: false },
+    });
+    expect(request).toHaveBeenNthCalledWith(3, {
+      path: '/view/view%2F1/comment',
+      method: 'POST',
+      body: { comment_text: 'View note', notify_all: false },
+    });
+  });
+
+  it('creates a threaded reply and assigns it to a group', async () => {
+    const { call, request } = harness([{ id: 'reply-1' }]);
+
+    await call('create_comment', {
+      reply_to_id: 'parent/1',
+      comment_text: 'Following up',
+      group_assignee: 'group-1',
+      notify_all: true,
+    });
+
+    expect(request).toHaveBeenCalledWith({
+      path: '/comment/parent%2F1/reply',
+      method: 'POST',
+      body: {
+        comment_text: 'Following up',
+        group_assignee: 'group-1',
+        notify_all: true,
+      },
+    });
+  });
+
   it('retrieves threaded replies from the parent comment endpoint', async () => {
     const { call, request } = harness([{ comments: [{ id: 'reply-1' }] }]);
     const result = await call('get_threaded_replies', { comment_id: 'parent/1' });
@@ -137,5 +205,48 @@ describe('comment tools', () => {
       structuredContent: { error: { code: 'INVALID_INPUT' } },
     });
     expect(request).not.toHaveBeenCalled();
+  });
+
+  it('updates a comment with the complete replacement payload', async () => {
+    const { call, request } = harness([{}]);
+
+    await call('update_comment', {
+      comment_id: 'comment/1',
+      comment_text: 'Updated content',
+      assignee: '183',
+      group_assignee: 'group-1',
+      resolved: true,
+    });
+
+    expect(request).toHaveBeenCalledWith({
+      path: '/comment/comment%2F1',
+      method: 'PUT',
+      body: {
+        comment_text: 'Updated content',
+        assignee: 183,
+        group_assignee: 'group-1',
+        resolved: true,
+      },
+    });
+  });
+
+  it('requires a confirmed preview before deleting a comment', async () => {
+    const { call, request } = harness([{}], true);
+    const preview = await call('delete_comment', { comment_id: '456' });
+    const previewData = preview.structuredContent?.data as
+      | { confirmation_token?: string }
+      | undefined;
+
+    expect(request).not.toHaveBeenCalled();
+    expect(previewData?.confirmation_token).toBeTypeOf('string');
+
+    await call('delete_comment', {
+      comment_id: '456',
+      dry_run: false,
+      confirm: true,
+      confirmation_token: previewData?.confirmation_token,
+    });
+
+    expect(request).toHaveBeenCalledWith({ path: '/comment/456', method: 'DELETE' });
   });
 });
